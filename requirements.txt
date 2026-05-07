@@ -3,5 +3,4 @@ pandas
 openpyxl
 matplotlib
 fpdf
-pywin32
 pillow
