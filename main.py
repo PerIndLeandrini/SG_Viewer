@@ -23,7 +23,16 @@ from PIL import Image
 # CONFIG BASE
 # =========================================================
 BASE_DIR = Path(__file__).resolve().parent
-BASE_PATH = BASE_DIR / "moduli_compilati"
+# Cartella multi-azienda. Ogni utente, dopo il login, viene agganciato
+# alla propria cartella aziendale tramite Streamlit Secrets.
+ROOT_MODULES_DIR = BASE_DIR / "moduli_aziende"
+DEFAULT_COMPANY_SLUG = "interglobo"
+
+# Fallback: mantiene compatibilità con la vecchia struttura /moduli_compilati
+# utile in locale o se vuoi continuare a testare una singola azienda.
+DEFAULT_BASE_PATH = BASE_DIR / "moduli_compilati"
+BASE_PATH = DEFAULT_BASE_PATH
+
 ASSETS_DIR = BASE_DIR / "assets"
 LOGO_PATH = ASSETS_DIR / "logo.png"
 
@@ -415,11 +424,89 @@ SENSITIVE_KEYWORDS = [
 # =========================================================
 # UTILITY
 # =========================================================
+def _secrets_dict(section: str) -> dict:
+    """Legge una sezione dei secrets come dizionario, senza rompere l'app se manca."""
+    try:
+        return dict(st.secrets.get(section, {}))
+    except Exception:
+        return {}
+
+
+def get_user_company_slug(username: str) -> str:
+    """
+    Restituisce lo slug aziendale associato all'utente.
+
+    Esempio secrets:
+    [viewer_user_companies]
+    Guest = "interglobo"
+    guest_2 = "shipping_service"
+    """
+    user_companies = _secrets_dict("viewer_user_companies")
+    slug = str(user_companies.get(username, DEFAULT_COMPANY_SLUG)).strip()
+    return slug or DEFAULT_COMPANY_SLUG
+
+
+def get_company_display_name(slug: str) -> str:
+    """
+    Restituisce il nome azienda leggibile.
+
+    Esempio secrets:
+    [viewer_company_names]
+    interglobo = "Interglobo"
+    shipping_service = "Shipping Service"
+    """
+    company_names = _secrets_dict("viewer_company_names")
+    fallback = slug.replace("_", " ").replace("-", " ").title()
+    return str(company_names.get(slug, fallback)).strip() or fallback
+
+
+def set_current_company_for_user(username: str) -> None:
+    slug = get_user_company_slug(username)
+    st.session_state.viewer_company_slug = slug
+    st.session_state.viewer_company_name = get_company_display_name(slug)
+
+
+def get_current_company_slug() -> str:
+    return str(st.session_state.get("viewer_company_slug", DEFAULT_COMPANY_SLUG)).strip() or DEFAULT_COMPANY_SLUG
+
+
+def get_current_company_name() -> str:
+    return str(
+        st.session_state.get(
+            "viewer_company_name",
+            get_company_display_name(get_current_company_slug()),
+        )
+    ).strip()
+
+
+def get_current_base_path() -> Path:
+    """
+    Percorso effettivo dei moduli per l'azienda loggata.
+
+    Struttura prevista:
+    moduli_aziende/
+        interglobo/
+            moduli_compilati/
+        shipping_service/
+            moduli_compilati/
+
+    Se la cartella multi-azienda non esiste, usa il vecchio fallback:
+    moduli_compilati/
+    """
+    slug = get_current_company_slug()
+    company_path = ROOT_MODULES_DIR / slug / "moduli_compilati"
+
+    if company_path.exists():
+        return company_path
+
+    return DEFAULT_BASE_PATH
+
+
 def get_file_path(file_key: str) -> Path:
     fname = FILE_MAP.get(file_key)
     if not fname:
         raise ValueError(f"Modulo non mappato: {file_key}")
-    return BASE_PATH / fname
+    return get_current_base_path() / fname
 
 
 def normalize_df(df: pd.DataFrame) -> pd.DataFrame:
@@ -552,12 +639,19 @@ def check_login() -> bool:
         st.session_state.viewer_logged = False
     if "viewer_user" not in st.session_state:
         st.session_state.viewer_user = ""
+    if "viewer_company_slug" not in st.session_state:
+        st.session_state.viewer_company_slug = DEFAULT_COMPANY_SLUG
+    if "viewer_company_name" not in st.session_state:
+        st.session_state.viewer_company_name = get_company_display_name(DEFAULT_COMPANY_SLUG)
 
     if st.session_state.viewer_logged:
         st.sidebar.success(f"Accesso effettuato: {st.session_state.viewer_user}")
+        st.sidebar.caption(f"Azienda: {get_current_company_name()}")
         if st.sidebar.button("Logout", use_container_width=True):
             st.session_state.viewer_logged = False
             st.session_state.viewer_user = ""
+            st.session_state.viewer_company_slug = DEFAULT_COMPANY_SLUG
+            st.session_state.viewer_company_name = get_company_display_name(DEFAULT_COMPANY_SLUG)
             st.rerun()
         return True
 
@@ -577,6 +671,7 @@ def check_login() -> bool:
         if username in users and users[username] == password:
             st.session_state.viewer_logged = True
             st.session_state.viewer_user = username
+            set_current_company_for_user(username)
             st.rerun()
         else:
             st.sidebar.error("Credenziali non valide")
@@ -590,6 +685,10 @@ def dashboard_qualifica():
     st.markdown(f"<div class='main-title'>🤝 {APP_TITLE}</div>", unsafe_allow_html=True)
     st.markdown(
         f"<div class='main-subtitle'>{APP_SUBTITLE}. Area riservata alla consultazione delle evidenze rese disponibili.</div>",
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        f"<div class='main-subtitle'>Azienda consultata: <strong>{html.escape(get_current_company_name())}</strong></div>",
         unsafe_allow_html=True,
     )
 
@@ -682,7 +781,7 @@ def viewer_readonly(file_key: str):
     fp = get_file_path(file_key)
     if not fp.exists():
         st.warning(f"File non trovato: {fp}")
-        st.caption("Verifica che il file sia presente nella cartella 'moduli_compilati'.")
+        st.caption("Verifica che il file sia presente nella cartella aziendale assegnata all'utente loggato.")
         return
 
     df = read_excel_safe(file_key)
@@ -808,6 +907,7 @@ def main():
 
     with st.sidebar:
         st.markdown("---")
+        st.caption(f"Azienda corrente: {get_current_company_name()}")
         st.markdown("### Navigazione")
         selected_label = st.radio(
             "Seleziona area",
