@@ -34,7 +34,14 @@ DEFAULT_BASE_PATH = BASE_DIR / "moduli_compilati"
 BASE_PATH = DEFAULT_BASE_PATH
 
 ASSETS_DIR = BASE_DIR / "assets"
-LOGO_PATH = ASSETS_DIR / "logo.png"
+
+# Loghi:
+# - logo_home.png: mostrato nella pagina di login / accesso generale
+# - logo_<azienda>.png: mostrato dopo il login in base allo slug aziendale
+#   Esempi: logo_interglobo.png, logo_shipping_service.png
+# - logo.png: fallback generico, se presente
+HOME_LOGO_PATH = ASSETS_DIR / "logo_home.png"
+DEFAULT_LOGO_PATH = ASSETS_DIR / "logo.png"
 
 APP_TITLE = "Portale Qualifica Fornitore"
 APP_SUBTITLE = "Viewer evidenze Sistema di Gestione Qualità"
@@ -320,17 +327,81 @@ def apply_anti_copy_protection():
 apply_anti_copy_protection()
 
 # =========================================================
-# LOGO SIDEBAR
+# LOGHI DINAMICI
 # =========================================================
+def get_company_logo_filename(slug: str) -> str:
+    """
+    Restituisce il nome file logo associato allo slug aziendale.
+
+    Di default usa: logo_<slug>.png
+    Esempio: interglobo -> logo_interglobo.png
+
+    Puoi anche sovrascrivere da secrets:
+    [viewer_company_logos]
+    interglobo = "logo_interglobo.png"
+    shipping_service = "logo_shipping.png"
+    """
+    logo_map = _secrets_dict("viewer_company_logos")
+    default_name = f"logo_{slug}.png"
+    return str(logo_map.get(slug, default_name)).strip() or default_name
+
+
+def get_company_logo_path(slug: str) -> Path:
+    return ASSETS_DIR / get_company_logo_filename(slug)
+
+
+def get_active_logo_path() -> Path:
+    """
+    Prima del login mostra logo_home.png.
+    Dopo il login mostra il logo dell'azienda associata all'utente.
+    Se il logo specifico non esiste, usa logo.png come fallback.
+    """
+    logged = bool(st.session_state.get("viewer_logged", False))
+
+    if not logged:
+        if HOME_LOGO_PATH.exists():
+            return HOME_LOGO_PATH
+        return DEFAULT_LOGO_PATH
+
+    slug = get_current_company_slug()
+    company_logo = get_company_logo_path(slug)
+    if company_logo.exists():
+        return company_logo
+
+    return DEFAULT_LOGO_PATH
+
+
 def sidebar_logo():
     try:
-        if LOGO_PATH.exists():
-            img = Image.open(LOGO_PATH)
+        logo_path = get_active_logo_path()
+        if logo_path.exists():
+            img = Image.open(logo_path)
             st.image(img, use_container_width=True)
         else:
             st.caption("Logo non disponibile")
     except Exception as e:
         st.caption(f"Logo non caricabile: {e}")
+
+
+def render_login_home():
+    """Pagina centrale mostrata prima del login."""
+    st.markdown("<br>", unsafe_allow_html=True)
+    logo_path = HOME_LOGO_PATH if HOME_LOGO_PATH.exists() else DEFAULT_LOGO_PATH
+
+    c1, c2, c3 = st.columns([1, 1.2, 1])
+    with c2:
+        if logo_path.exists():
+            st.image(Image.open(logo_path), use_container_width=True)
+
+    st.markdown(
+        f"<div class='main-title' style='text-align:center;'>🤝 {APP_TITLE}</div>",
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        f"<div class='main-subtitle' style='text-align:center;'>{APP_SUBTITLE}</div>",
+        unsafe_allow_html=True,
+    )
+    st.info("Inserire le credenziali nella barra laterale per accedere al viewer documentale.")
 
 # =========================================================
 # FILE MAP - SOLO MODULI UTILIZZABILI NEL VIEWER
@@ -478,18 +549,28 @@ def get_current_company_name() -> str:
         )
     ).strip()
 
+
 def get_current_base_path() -> Path:
+    """
+    Percorso effettivo dei moduli per l'azienda loggata.
+
+    Struttura prevista:
+    moduli_aziende/
+        interglobo/
+            moduli_compilati/
+        shipping_service/
+            moduli_compilati/
+
+    Se la cartella multi-azienda non esiste, usa il vecchio fallback:
+    moduli_compilati/
+    """
     slug = get_current_company_slug()
     company_path = ROOT_MODULES_DIR / slug / "moduli_compilati"
 
     if company_path.exists():
         return company_path
 
-    st.error(
-        f"Cartella moduli non trovata per l'azienda assegnata: {slug}. "
-        "Verificare la struttura del repository o la configurazione dei secrets."
-    )
-    st.stop()
+    return DEFAULT_BASE_PATH
 
 
 def get_file_path(file_key: str) -> Path:
@@ -672,15 +753,31 @@ def check_login() -> bool:
 # DASHBOARD QUALIFICA
 # =========================================================
 def dashboard_qualifica():
-    st.markdown(f"<div class='main-title'>🤝 {APP_TITLE}</div>", unsafe_allow_html=True)
-    st.markdown(
-        f"<div class='main-subtitle'>{APP_SUBTITLE}. Area riservata alla consultazione delle evidenze rese disponibili.</div>",
-        unsafe_allow_html=True,
-    )
-    st.markdown(
-        f"<div class='main-subtitle'>Azienda consultata: <strong>{html.escape(get_current_company_name())}</strong></div>",
-        unsafe_allow_html=True,
-    )
+    company_logo = get_company_logo_path(get_current_company_slug())
+    if company_logo.exists():
+        c_logo, c_title = st.columns([0.18, 0.82])
+        with c_logo:
+            st.image(Image.open(company_logo), use_container_width=True)
+        with c_title:
+            st.markdown(f"<div class='main-title'>🤝 {APP_TITLE}</div>", unsafe_allow_html=True)
+            st.markdown(
+                f"<div class='main-subtitle'>{APP_SUBTITLE}. Area riservata alla consultazione delle evidenze rese disponibili.</div>",
+                unsafe_allow_html=True,
+            )
+            st.markdown(
+                f"<div class='main-subtitle'>Azienda consultata: <strong>{html.escape(get_current_company_name())}</strong></div>",
+                unsafe_allow_html=True,
+            )
+    else:
+        st.markdown(f"<div class='main-title'>🤝 {APP_TITLE}</div>", unsafe_allow_html=True)
+        st.markdown(
+            f"<div class='main-subtitle'>{APP_SUBTITLE}. Area riservata alla consultazione delle evidenze rese disponibili.</div>",
+            unsafe_allow_html=True,
+        )
+        st.markdown(
+            f"<div class='main-subtitle'>Azienda consultata: <strong>{html.escape(get_current_company_name())}</strong></div>",
+            unsafe_allow_html=True,
+        )
 
     st.info(
         "Il portale è in sola lettura: non consente inserimenti, modifiche o cancellazioni. "
@@ -892,7 +989,7 @@ def main():
         st.caption(APP_SUBTITLE)
 
     if not check_login():
-        st.info("Inserire le credenziali per accedere al viewer documentale.")
+        render_login_home()
         st.stop()
 
     with st.sidebar:
