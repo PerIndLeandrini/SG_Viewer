@@ -478,28 +478,18 @@ def get_current_company_name() -> str:
         )
     ).strip()
 
-
 def get_current_base_path() -> Path:
-    """
-    Percorso effettivo dei moduli per l'azienda loggata.
-
-    Struttura prevista:
-    moduli_aziende/
-        interglobo/
-            moduli_compilati/
-        shipping_service/
-            moduli_compilati/
-
-    Se la cartella multi-azienda non esiste, usa il vecchio fallback:
-    moduli_compilati/
-    """
     slug = get_current_company_slug()
     company_path = ROOT_MODULES_DIR / slug / "moduli_compilati"
 
     if company_path.exists():
         return company_path
 
-    return DEFAULT_BASE_PATH
+    st.error(
+        f"Cartella moduli non trovata per l'azienda assegnata: {slug}. "
+        "Verificare la struttura del repository o la configurazione dei secrets."
+    )
+    st.stop()
 
 
 def get_file_path(file_key: str) -> Path:
