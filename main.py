@@ -417,6 +417,7 @@ FILE_MAP = {
     "MOD-870-B-Servizi non conformi": "MOD-870-B-Prodotti_Non_Conformi.xlsx",
     "MOD-910-C-Soddisfazione clienti": "MOD-910-C-Soddisfazione_Clienti.xlsx",
     "MOD-910-H-Performance": "MOD-910-H-Performance.xlsx",
+    "MOD-920-A-Piano audit annuale": "MOD-920-A-Piano_Audit_Annuale.xlsx",
     "MOD-920-E-Monitoraggioauditing": "MOD-920-E-Monitoraggio_Auditing.xlsx",
 }
 
@@ -435,7 +436,7 @@ EXTERNAL_PAGES = {
     "⚠️ Servizi Non Conformi": "MOD-870-B-Servizi non conformi",
     "😊 Soddisfazione Clienti": "MOD-910-C-Soddisfazione clienti",
     "📊 Performance e KPI": "MOD-910-H-Performance",
-    "🔍 Audit Interni": "MOD-920-E-Monitoraggioauditing",
+    "🔍 Audit Interni": "audit_esterno",
 }
 
 # =========================================================
@@ -481,8 +482,13 @@ HIDDEN_COLUMNS_BY_MODULE = {
         "Note interne", "Dato economico", "Dati economici", "Margine", "Fatturato",
         "Costo", "Importo", "Cliente", "Commessa",
     ],
+    "MOD-920-A-Piano audit annuale": [
+        "Auditor", "Referente area", "Criteri / Riferimenti", "Obiettivi", "Note",
+    ],
     "MOD-920-E-Monitoraggioauditing": [
-        "Auditor", "Note interne", "Dettaglio NC", "Evidenza riservata",
+        "Auditor", "Responsabile", "Descrizione", "Azione prevista",
+        "ID NC collegata", "ID Azione Correttiva",
+        "Verifica efficacia / Evidenze", "Note interne", "Dettaglio NC", "Evidenza riservata",
     ],
 }
 
@@ -847,6 +853,27 @@ def dashboard_qualifica():
     for page_label, file_key in EXTERNAL_PAGES.items():
         if file_key == "dashboard":
             continue
+
+        # La sezione Audit è una vista composta: il dato principale esposto
+        # all'esterno è il Piano Audit Annuale; i follow-up sono un riepilogo accessorio.
+        if file_key == "audit_esterno":
+            plan_key = "MOD-920-A-Piano audit annuale"
+            follow_key = "MOD-920-E-Monitoraggioauditing"
+            fp_plan = get_file_path(plan_key)
+            fp_follow = get_file_path(follow_key)
+            files_shown = FILE_MAP.get(plan_key, "")
+            if fp_follow.exists():
+                files_shown += " + " + FILE_MAP.get(follow_key, "")
+            available_rows.append(
+                {
+                    "Area": page_label,
+                    "File": files_shown,
+                    "Disponibilità": "Presente" if fp_plan.exists() else "Non trovato",
+                    "Record": count_records(plan_key) if fp_plan.exists() else 0,
+                }
+            )
+            continue
+
         fp = get_file_path(file_key)
         available_rows.append(
             {
@@ -857,6 +884,191 @@ def dashboard_qualifica():
             }
         )
     render_view_table(pd.DataFrame(available_rows))
+
+# =========================================================
+# VIEWER AUDIT ESTERNO - PIANO ANNUALE + FOLLOW-UP
+# ---------------------------------------------------------
+# La pagina Audit esterna NON apre direttamente il registro
+# MOD-920-E. Compone invece una vista consultabile basata su:
+# - MOD-920-A: Piano Audit Annuale, documento principale;
+# - MOD-920-E: riepilogo follow-up, se presente.
+# Non espone Programmi, Verbali, nominativi o dettagli NC/AC.
+# =========================================================
+def _audit_filter_values(df: pd.DataFrame, column: str) -> list[str]:
+    """Restituisce valori filtro puliti e ordinati per una colonna presente."""
+    if df is None or df.empty or column not in df.columns:
+        return ["Tutti"]
+    values = (
+        df[column]
+        .astype(str)
+        .map(str.strip)
+        .replace("", pd.NA)
+        .dropna()
+        .unique()
+        .tolist()
+    )
+    return ["Tutti"] + sorted(values)
+
+
+def _audit_apply_text_search(df: pd.DataFrame, query: str) -> pd.DataFrame:
+    """Ricerca semplice su tutti i campi della vista già depurata."""
+    if df is None or df.empty or not query.strip():
+        return df
+    ql = query.lower().strip()
+    return df[df.apply(lambda row: any(ql in str(v).lower() for v in row.values), axis=1)]
+
+
+def viewer_audit_esterno():
+    plan_key = "MOD-920-A-Piano audit annuale"
+    follow_key = "MOD-920-E-Monitoraggioauditing"
+
+    st.markdown("<div class='main-title'>🔍 Audit Interni</div>", unsafe_allow_html=True)
+    st.markdown(
+        "<div class='main-subtitle'>Consultazione del Piano Audit Annuale e dello stato generale dei follow-up condivisibili.</div>",
+        unsafe_allow_html=True,
+    )
+    st.info(
+        "La vista è resa disponibile ai fini della qualifica fornitore e riporta la pianificazione "
+        "e lo stato degli audit. Verbali, evidenze di dettaglio, riferimenti nominativi e azioni "
+        "interne non sono esposti nel portale esterno."
+    )
+
+    plan_path = get_file_path(plan_key)
+    if not plan_path.exists():
+        st.warning(f"Piano Audit Annuale non disponibile: {plan_path.name}")
+        st.caption(
+            "Carica il file MOD-920-A-Piano_Audit_Annuale.xlsx nella cartella "
+            "moduli_compilati dell'azienda associata all'utente."
+        )
+        return
+
+    plan = read_excel_safe(plan_key)
+    if plan is None or plan.empty:
+        st.info("Il Piano Audit Annuale non contiene registrazioni consultabili.")
+        return
+
+    plan = plan[plan.astype(str).apply(lambda r: any(x.strip() for x in r), axis=1)].copy()
+
+    follow = read_excel_safe(follow_key)
+    if follow is not None and not follow.empty:
+        follow = follow[follow.astype(str).apply(lambda r: any(x.strip() for x in r), axis=1)].copy()
+    else:
+        follow = pd.DataFrame()
+
+    # ---------------------------
+    # Indicatori sintetici
+    # ---------------------------
+    stato_series = (
+        plan["Stato"].astype(str).str.strip().str.lower()
+        if "Stato" in plan.columns
+        else pd.Series([""] * len(plan))
+    )
+    n_audit = len(plan)
+    n_chiusi = int((stato_series == "chiuso").sum())
+    n_eseguiti = int(stato_series.str.contains("eseguito|chiuso", case=False, regex=True, na=False).sum())
+    n_follow = len(follow) if not follow.empty else 0
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Audit a piano", n_audit)
+    c2.metric("Audit eseguiti / chiusi", n_eseguiti)
+    c3.metric("Audit chiusi", n_chiusi)
+    c4.metric("Follow-up registrati", n_follow)
+
+    # ---------------------------
+    # Piano Audit Annuale
+    # ---------------------------
+    st.markdown("### 📅 Piano Audit Annuale")
+
+    f1, f2, f3, f4 = st.columns([1.0, 1.15, 1.5, 1.7])
+    with f1:
+        anno = st.selectbox("Anno", _audit_filter_values(plan, "Anno"), key="audit_ext_anno")
+    with f2:
+        stato = st.selectbox("Stato", _audit_filter_values(plan, "Stato"), key="audit_ext_stato")
+    with f3:
+        tipologia = st.selectbox(
+            "Tipologia audit",
+            _audit_filter_values(plan, "Tipologia audit"),
+            key="audit_ext_tipologia",
+        )
+    with f4:
+        ricerca = st.text_input("Cerca nel piano audit", key="audit_ext_search")
+
+    plan_view = plan.copy()
+    if anno != "Tutti" and "Anno" in plan_view.columns:
+        plan_view = plan_view[plan_view["Anno"].astype(str).str.strip() == anno]
+    if stato != "Tutti" and "Stato" in plan_view.columns:
+        plan_view = plan_view[plan_view["Stato"].astype(str).str.strip() == stato]
+    if tipologia != "Tutti" and "Tipologia audit" in plan_view.columns:
+        plan_view = plan_view[plan_view["Tipologia audit"].astype(str).str.strip() == tipologia]
+    plan_view = _audit_apply_text_search(plan_view, ricerca)
+
+    # Campi deliberatamente esposti al viewer esterno.
+    plan_public_cols = [
+        "ID Audit",
+        "Anno",
+        "Processo / Area",
+        "Tipologia audit",
+        "Periodicità",
+        "Data pianificata",
+        "Stato",
+        "Data effettiva",
+        "Esito sintetico",
+    ]
+    plan_public_cols = [c for c in plan_public_cols if c in plan_view.columns]
+    render_view_table(
+        plan_view[plan_public_cols] if plan_public_cols else plan_view,
+        caption=f"Audit visualizzati: {len(plan_view)} / {len(plan)}",
+    )
+
+    # ---------------------------
+    # Follow-up condivisibili
+    # ---------------------------
+    st.markdown("### ✅ Monitoraggio follow-up")
+
+    if follow.empty:
+        st.info("Nessun follow-up audit condivisibile presente nel registro.")
+        return
+
+    ff1, ff2, ff3 = st.columns([1.25, 1.25, 2.0])
+    with ff1:
+        fu_audit = st.selectbox(
+            "ID Audit follow-up",
+            _audit_filter_values(follow, "ID Audit"),
+            key="audit_ext_fu_id",
+        )
+    with ff2:
+        fu_stato = st.selectbox(
+            "Stato follow-up",
+            _audit_filter_values(follow, "Stato follow-up"),
+            key="audit_ext_fu_stato",
+        )
+    with ff3:
+        fu_ricerca = st.text_input("Cerca nei follow-up", key="audit_ext_fu_search")
+
+    follow_view = follow.copy()
+    if fu_audit != "Tutti" and "ID Audit" in follow_view.columns:
+        follow_view = follow_view[follow_view["ID Audit"].astype(str).str.strip() == fu_audit]
+    if fu_stato != "Tutti" and "Stato follow-up" in follow_view.columns:
+        follow_view = follow_view[follow_view["Stato follow-up"].astype(str).str.strip() == fu_stato]
+    follow_view = _audit_apply_text_search(follow_view, fu_ricerca)
+
+    # Esclusi volutamente: descrizione puntuale, responsabili,
+    # azioni interne, ID NC/AC ed evidenze di chiusura.
+    follow_public_cols = [
+        "ID Audit",
+        "ID Follow-up",
+        "Tipologia rilievo",
+        "Data apertura",
+        "Scadenza",
+        "Stato follow-up",
+        "Monitoraggio scadenza",
+    ]
+    follow_public_cols = [c for c in follow_public_cols if c in follow_view.columns]
+    render_view_table(
+        follow_view[follow_public_cols] if follow_public_cols else follow_view,
+        caption=f"Follow-up visualizzati: {len(follow_view)} / {len(follow)}",
+    )
+
 
 # =========================================================
 # VIEWER GENERICO SOLO LETTURA
@@ -1009,6 +1221,8 @@ def main():
 
     if selected_page == "dashboard":
         dashboard_qualifica()
+    elif selected_page == "audit_esterno":
+        viewer_audit_esterno()
     else:
         viewer_readonly(selected_page)
 
