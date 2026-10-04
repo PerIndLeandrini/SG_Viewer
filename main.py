@@ -440,6 +440,13 @@ EXTERNAL_PAGES = {
 }
 
 EXTERNAL_PAGES["⚠️ Risk Management"] = "risk_management"
+# Integrazione audit: lettura Excel esistente e visualizzazione del PDF originale.
+FILE_MAP.update({
+    "MOD-920-B-Programma audit": "MOD-920-B-Programma_Audit.xlsx",
+    "MOD-920-C-Verbale audit": "MOD-920-C-Verbale_Audit.pdf",
+})
+EXTERNAL_PAGES["📋 Programma Audit"] = "MOD-920-B-Programma audit"
+EXTERNAL_PAGES["📄 MOD-920-C — Verbale Audit"] = "audit_verbale_pdf"
 
 # =========================================================
 # COLONNE DA NASCONDERE NEL VIEWER ESTERNO
@@ -856,6 +863,16 @@ def dashboard_qualifica():
         if file_key == "dashboard":
             continue
 
+        if file_key == "audit_verbale_pdf":
+            verbale_path = get_file_path("MOD-920-C-Verbale audit")
+            available_rows.append({
+                "Area": page_label,
+                "File": verbale_path.name,
+                "Disponibilità": "Presente" if verbale_path.exists() else "Non trovato",
+                "Record": "Documento PDF",
+            })
+            continue
+
         if file_key == "risk_management":
             risk_paths = [get_current_base_path() / filename for filename in RISK_WORKBOOKS.values()]
             available_rows.append({
@@ -941,8 +958,8 @@ def viewer_audit_esterno():
     )
     st.info(
         "La vista è resa disponibile ai fini della qualifica fornitore e riporta la pianificazione "
-        "e lo stato degli audit. Verbali, evidenze di dettaglio, riferimenti nominativi e azioni "
-        "interne non sono esposti nel portale esterno."
+        "e lo stato degli audit. Il Programma Audit e il Verbale PDF sono consultabili nelle "
+        "rispettive voci del menu."
     )
 
     plan_path = get_file_path(plan_key)
@@ -1443,6 +1460,45 @@ def viewer_risk_management():
         st.error(f"Impossibile leggere il modulo rischi: {exc}")
 
 
+
+def render_verbale_page(path, page_number, dpi=150):
+    """Renderizza una pagina del PDF in memoria, senza modificare il documento."""
+    import pymupdf
+    with pymupdf.open(str(path)) as document:
+        return document[page_number].get_pixmap(dpi=dpi, alpha=False).tobytes("png")
+
+def viewer_verbale_audit_pdf():
+    st.markdown("## MOD-920-C — Verbale Audit")
+    st.caption(f"Azienda: {get_current_company_name()} · Consultazione del documento PDF")
+    path = get_file_path("MOD-920-C-Verbale audit")
+    if not path.exists():
+        st.info(f"Verbale non disponibile per l'azienda corrente: {path.name}")
+        return
+    try:
+        import pymupdf
+    except ImportError:
+        st.error("Visualizzazione PDF non disponibile: aggiungere PyMuPDF al requirements.txt e riavviare l'app.")
+        return
+    try:
+        with pymupdf.open(str(path)) as document:
+            if document.needs_pass:
+                st.warning("Il PDF è protetto da password e non può essere visualizzato.")
+                return
+            pages = document.page_count
+        if pages == 0:
+            st.info("Il PDF non contiene pagine visualizzabili.")
+            return
+        key = f"audit_pdf_{get_current_company_slug()}"
+        page = st.selectbox("Pagina", list(range(pages)), format_func=lambda index: f"Pagina {index + 1} di {pages}", key=f"{key}_page")
+        dpi = st.selectbox("Definizione", [150, 200, 100], format_func=lambda value: {100: "Standard", 150: "Alta", 200: "Molto alta"}[value], key=f"{key}_dpi")
+        st.image(render_verbale_page(path, page, dpi), use_container_width=True)
+        st.caption(f"{path.name} — pagina {page + 1} di {pages}")
+        if ALLOW_DOCUMENT_DOWNLOAD:
+            st.download_button("Scarica verbale PDF", data=path.read_bytes(), file_name=path.name, mime="application/pdf", key=f"{key}_download")
+    except Exception as exc:
+        st.error(f"Impossibile visualizzare il verbale PDF: {exc}")
+
+
 # =========================================================
 # APP
 # =========================================================
@@ -1475,6 +1531,8 @@ def main():
         dashboard_qualifica()
     elif selected_page == "audit_esterno":
         viewer_audit_esterno()
+    elif selected_page == "audit_verbale_pdf":
+        viewer_verbale_audit_pdf()
     elif selected_page == "risk_management":
         viewer_risk_management()
     else:
