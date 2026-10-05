@@ -426,6 +426,7 @@ FILE_MAP = {
 # =========================================================
 EXTERNAL_PAGES = {
     "🏠 Dashboard Qualifica": "dashboard",
+    "📚 Sistema di Gestione": "sistema_gestione",
     "📁 Registro Documenti SGQ": "REG-DOC - Registro Documenti SGQ",
     "🏢 Ruoli e Requisiti": "MOD-530-B-Ruoli e requisiti",
     "🧩 Matrice Responsabilità": "MOD-530-C-Matrice delle responsabilità",
@@ -1500,6 +1501,276 @@ def viewer_verbale_audit_pdf():
 
 
 # =========================================================
+# SISTEMA DI GESTIONE - GOOGLE DRIVE (SOLA LETTURA)
+# =========================================================
+DRIVE_SYSTEM_AREAS = ("AUDIT", "DIREZIONE", "DVR", "PROCEDURE", "MANUALE")
+DRIVE_FOLDER_MIME = "application/vnd.google-apps.folder"
+DRIVE_PDF_MIME = "application/pdf"
+
+
+def get_current_drive_root_id() -> str:
+    """Restituisce la cartella Drive associata all'azienda dell'utente loggato."""
+    slug = get_current_company_slug()
+
+    # Configurazione consigliata:
+    # [drive_folders]
+    # aifecs = "ID_CARTELLA_DRIVE"
+    drive_folders = _secrets_dict("drive_folders")
+    root_id = str(drive_folders.get(slug, "")).strip()
+    if root_id:
+        return root_id
+
+    # Compatibilità con la vecchia sezione [folders], che usava spesso chiavi maiuscole.
+    legacy_folders = _secrets_dict("folders")
+    return str(
+        legacy_folders.get(slug)
+        or legacy_folders.get(slug.upper())
+        or ""
+    ).strip()
+
+
+@st.cache_resource(show_spinner=False)
+def get_drive_service():
+    """Crea un client Google Drive in sola lettura usando [google] nei secrets."""
+    try:
+        from google.oauth2 import service_account
+        from googleapiclient.discovery import build
+    except ImportError as exc:
+        raise RuntimeError(
+            "Librerie Google Drive non installate. Aggiungere google-api-python-client e google-auth a requirements.txt."
+        ) from exc
+
+    google_info = _secrets_dict("google")
+    if not google_info:
+        raise RuntimeError("Configurazione Google mancante nei secrets: sezione [google].")
+
+    required = ("type", "project_id", "private_key", "client_email", "token_uri")
+    missing = [key for key in required if not str(google_info.get(key, "")).strip()]
+    if missing:
+        raise RuntimeError(
+            "Configurazione [google] incompleta. Campi mancanti: " + ", ".join(missing)
+        )
+
+    credentials = service_account.Credentials.from_service_account_info(
+        google_info,
+        scopes=["https://www.googleapis.com/auth/drive.readonly"],
+    )
+    return build("drive", "v3", credentials=credentials, cache_discovery=False)
+
+
+@st.cache_data(ttl=120, show_spinner=False)
+def drive_list_children(parent_id: str) -> list[dict]:
+    """Elenca file/cartelle figli di una cartella Drive, con paginazione."""
+    service = get_drive_service()
+    items: list[dict] = []
+    page_token = None
+
+    while True:
+        response = service.files().list(
+            q=f"'{parent_id}' in parents and trashed = false",
+            spaces="drive",
+            fields="nextPageToken, files(id,name,mimeType,modifiedTime,size)",
+            orderBy="folder,name_natural",
+            pageToken=page_token,
+            pageSize=1000,
+            supportsAllDrives=True,
+            includeItemsFromAllDrives=True,
+        ).execute()
+        items.extend(response.get("files", []))
+        page_token = response.get("nextPageToken")
+        if not page_token:
+            break
+
+    return items
+
+
+def drive_find_system_folders(root_id: str) -> dict[str, dict]:
+    """Trova le cinque aree SGQ previste direttamente sotto la root cliente."""
+    children = drive_list_children(root_id)
+    folders = {
+        str(item.get("name", "")).strip().upper(): item
+        for item in children
+        if item.get("mimeType") == DRIVE_FOLDER_MIME
+    }
+    return {name: folders[name] for name in DRIVE_SYSTEM_AREAS if name in folders}
+
+
+@st.cache_data(ttl=120, show_spinner=False)
+def drive_list_pdfs(folder_id: str) -> list[dict]:
+    """Elenca i PDF direttamente contenuti nella cartella selezionata."""
+    return [
+        item
+        for item in drive_list_children(folder_id)
+        if item.get("mimeType") == DRIVE_PDF_MIME
+        or str(item.get("name", "")).lower().endswith(".pdf")
+    ]
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def drive_download_file(file_id: str) -> bytes:
+    """Scarica un file Drive in memoria; non crea copie locali e non abilita download utente."""
+    from io import BytesIO
+    try:
+        from googleapiclient.http import MediaIoBaseDownload
+    except ImportError as exc:
+        raise RuntimeError("Modulo google-api-python-client non disponibile.") from exc
+
+    service = get_drive_service()
+    request = service.files().get_media(fileId=file_id, supportsAllDrives=True)
+    buffer = BytesIO()
+    downloader = MediaIoBaseDownload(buffer, request)
+    done = False
+    while not done:
+        _, done = downloader.next_chunk()
+    return buffer.getvalue()
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def render_drive_pdf_page(pdf_bytes: bytes, page_number: int, dpi: int = 150) -> bytes:
+    """Renderizza una pagina di un PDF Drive in PNG, interamente in memoria."""
+    import pymupdf
+
+    with pymupdf.open(stream=pdf_bytes, filetype="pdf") as document:
+        return document[page_number].get_pixmap(dpi=dpi, alpha=False).tobytes("png")
+
+
+def viewer_sistema_gestione():
+    st.markdown("<div class='main-title'>📚 Sistema di Gestione</div>", unsafe_allow_html=True)
+    st.markdown(
+        f"<div class='main-subtitle'>Documentazione ufficiale condivisa — "
+        f"<strong>{html.escape(get_current_company_name())}</strong></div>",
+        unsafe_allow_html=True,
+    )
+    st.info(
+        "Area in sola lettura collegata a Google Drive. I documenti disponibili dipendono "
+        "dall'azienda associata all'utente autenticato."
+    )
+
+    if st.button(
+        "🔄 Aggiorna documenti",
+        key=f"sgi_drive_refresh_{get_current_company_slug()}",
+    ):
+        drive_list_children.clear()
+        drive_list_pdfs.clear()
+        drive_download_file.clear()
+        render_drive_pdf_page.clear()
+        st.rerun()
+
+    root_id = get_current_drive_root_id()
+    if not root_id:
+        st.warning(
+            "Nessuna cartella Google Drive configurata per questa azienda. "
+            "Aggiungere lo slug aziendale nella sezione [drive_folders] dei secrets."
+        )
+        return
+
+    try:
+        folders = drive_find_system_folders(root_id)
+    except Exception as exc:
+        st.error(f"Impossibile accedere alla cartella Google Drive dell'azienda: {exc}")
+        st.caption(
+            "Verificare che la cartella sia condivisa con la service account configurata in [google] "
+            "e che l'ID in [drive_folders] sia corretto."
+        )
+        return
+
+    if not folders:
+        st.warning(
+            "La cartella Drive aziendale è raggiungibile, ma non contiene le aree previste "
+            "AUDIT, DIREZIONE, DVR, PROCEDURE o MANUALE."
+        )
+        return
+
+    # Riepilogo rapido della disponibilità documentale.
+    cols = st.columns(len(DRIVE_SYSTEM_AREAS))
+    area_pdfs: dict[str, list[dict]] = {}
+    for col, area in zip(cols, DRIVE_SYSTEM_AREAS):
+        folder = folders.get(area)
+        if folder:
+            try:
+                pdfs = drive_list_pdfs(folder["id"])
+            except Exception:
+                pdfs = []
+            area_pdfs[area] = pdfs
+            col.metric(area, len(pdfs), "PDF")
+        else:
+            area_pdfs[area] = []
+            col.metric(area, "—", "cartella assente")
+
+    st.markdown("### 📂 Area documentale")
+    available_areas = [area for area in DRIVE_SYSTEM_AREAS if area in folders]
+    selected_area = st.radio(
+        "Seleziona area del Sistema di Gestione",
+        available_areas,
+        horizontal=True,
+        key=f"sgi_drive_area_{get_current_company_slug()}",
+    )
+
+    pdfs = area_pdfs.get(selected_area, [])
+    if not pdfs:
+        st.info(f"Nessun PDF disponibile nella cartella {selected_area}.")
+        return
+
+    def _pdf_label(item: dict) -> str:
+        name = str(item.get("name", "Documento PDF"))
+        modified = str(item.get("modifiedTime", ""))[:10]
+        return f"{name}  ·  aggiornato {modified}" if modified else name
+
+    selected_pdf = st.selectbox(
+        "Documento",
+        pdfs,
+        format_func=_pdf_label,
+        key=f"sgi_drive_pdf_{get_current_company_slug()}_{selected_area}",
+    )
+
+    st.markdown("### 📄 Visualizzatore documento")
+    try:
+        with st.spinner("Caricamento documento da Google Drive..."):
+            pdf_bytes = drive_download_file(selected_pdf["id"])
+
+        import pymupdf
+        with pymupdf.open(stream=pdf_bytes, filetype="pdf") as document:
+            if document.needs_pass:
+                st.warning("Il PDF è protetto da password e non può essere visualizzato.")
+                return
+            pages = document.page_count
+
+        if pages == 0:
+            st.info("Il PDF non contiene pagine visualizzabili.")
+            return
+
+        file_key = str(selected_pdf.get("id", "pdf"))
+        c1, c2 = st.columns([1.6, 1.0])
+        with c1:
+            page = st.selectbox(
+                "Pagina",
+                list(range(pages)),
+                format_func=lambda index: f"Pagina {index + 1} di {pages}",
+                key=f"sgi_drive_page_{file_key}",
+            )
+        with c2:
+            dpi = st.selectbox(
+                "Definizione",
+                [150, 200, 100],
+                format_func=lambda value: {100: "Standard", 150: "Alta", 200: "Molto alta"}[value],
+                key=f"sgi_drive_dpi_{file_key}",
+            )
+
+        st.image(
+            render_drive_pdf_page(pdf_bytes, page, dpi),
+            use_container_width=True,
+        )
+        st.caption(
+            f"{selected_pdf.get('name', 'Documento PDF')} — {selected_area} — "
+            f"pagina {page + 1} di {pages}"
+        )
+        st.caption("Documento consultabile in sola lettura. Download non disponibile.")
+
+    except Exception as exc:
+        st.error(f"Impossibile visualizzare il documento selezionato: {exc}")
+
+
+# =========================================================
 # APP
 # =========================================================
 def main():
@@ -1535,6 +1806,8 @@ def main():
         viewer_verbale_audit_pdf()
     elif selected_page == "risk_management":
         viewer_risk_management()
+    elif selected_page == "sistema_gestione":
+        viewer_sistema_gestione()
     else:
         viewer_readonly(selected_page)
 
